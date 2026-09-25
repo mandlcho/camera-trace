@@ -26,24 +26,6 @@ function db() {
   });
 }
 
-export async function read_image(file) {
-  const url = URL.createObjectURL(file);
-  try {
-    const image = new Image();
-    image.src = url;
-    await image.decode();
-    const maxSide = 1800;
-    const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
-    canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
-    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.88);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
 export async function save_project(json) {
   const database = await db();
   const project = JSON.parse(json);
@@ -81,13 +63,17 @@ export async function delete_project(id) {
 "#)]
 extern "C" {
     #[wasm_bindgen(catch)]
-    async fn read_image(file: File) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(catch)]
     async fn save_project(json: String) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     async fn load_projects() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     async fn delete_project(id: String) -> Result<JsValue, JsValue>;
+}
+
+#[wasm_bindgen(module = "/image-import.js")]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    async fn read_image(file: File) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,6 +146,7 @@ fn app() -> Html {
     let camera_on = use_state(|| false);
     let camera_error = use_state(|| None::<String>);
     let busy = use_state(|| false);
+    let overlay_hidden = use_state(|| false);
     // start x/y, original image x/y, and the latest project state
     let drag_state = use_mut_ref(|| None::<(f64, f64, f64, f64, Project)>);
 
@@ -270,6 +257,7 @@ fn app() -> Html {
         let current = current.clone();
         let history = history.clone();
         let busy = busy.clone();
+        let overlay_hidden = overlay_hidden.clone();
         Callback::from(move |event: Event| {
             let input: HtmlInputElement = event.target_unchecked_into();
             let Some(file) = input.files().and_then(|files| files.item(0)) else {
@@ -278,6 +266,7 @@ fn app() -> Html {
             let current = current.clone();
             let history = history.clone();
             let busy = busy.clone();
+            let overlay_hidden = overlay_hidden.clone();
             busy.set(true);
             spawn_local(async move {
                 if let Ok(value) = read_image(file).await
@@ -292,6 +281,7 @@ fn app() -> Html {
                     next.truncate(12);
                     history.set(next);
                     current.set(Some(project));
+                    overlay_hidden.set(false);
                 }
                 busy.set(false);
             });
@@ -448,6 +438,11 @@ fn app() -> Html {
         })
     };
 
+    let toggle_overlay = {
+        let overlay_hidden = overlay_hidden.clone();
+        Callback::from(move |_| overlay_hidden.set(!*overlay_hidden))
+    };
+
     let reset = {
         let current = current.clone();
         let update_project = update_project.clone();
@@ -467,6 +462,7 @@ fn app() -> Html {
     let remove_current = {
         let current = current.clone();
         let history = history.clone();
+        let overlay_hidden = overlay_hidden.clone();
         Callback::from(move |_| {
             let Some(project) = (*current).clone() else {
                 return;
@@ -475,13 +471,14 @@ fn app() -> Html {
             next.retain(|item| item.id != project.id);
             current.set(next.first().cloned());
             history.set(next);
+            overlay_hidden.set(false);
             spawn_local(async move {
                 let _ = delete_project(project.id).await;
             });
         })
     };
 
-    let overlay = current.as_ref().map(|project| {
+    let overlay = current.as_ref().filter(|_| !*overlay_hidden).map(|project| {
         let flip_x = if project.flipped { -1.0 } else { 1.0 };
         let style = format!(
             "opacity:{};transform:translate(calc(-50% + {}px),calc(-50% + {}px)) rotate({}deg) scale({},{})",
@@ -508,7 +505,7 @@ fn app() -> Html {
                         <p>{"Choose an image, then drag it over the camera view."}</p>
                     </div>
                 })}
-                if current.is_some() {
+                if current.is_some() && !*overlay_hidden {
                     <div
                         class="gesture-surface"
                         role="application"
@@ -531,7 +528,7 @@ fn app() -> Html {
                         }
                     </div>
                 }
-                if current.is_some() {
+                if current.is_some() && !*overlay_hidden {
                     <div class="view-hint"><span></span>{"Drag anywhere to position"}</div>
                 }
 
@@ -539,6 +536,9 @@ fn app() -> Html {
                     <div class="action-row">
                         <button class="primary" onclick={choose_photo} disabled={*busy}>
                             {if *busy { "Preparing…" } else if current.is_some() { "Replace" } else { "Photo" }}
+                        </button>
+                        <button onclick={toggle_overlay} disabled={current.is_none()}>
+                            {if *overlay_hidden { "Show" } else { "Hide" }}
                         </button>
                         <button onclick={flip} disabled={current.is_none()}>{"Flip"}</button>
                         <button onclick={reset} disabled={current.is_none()}>{"Reset"}</button>
@@ -571,8 +571,12 @@ fn app() -> Html {
                                     let selected = current.as_ref().is_some_and(|item| item.id == project.id);
                                     let item = project.clone();
                                     let current = current.clone();
+                                    let overlay_hidden = overlay_hidden.clone();
                                     html! {
-                                        <button class={classes!("history-item", selected.then_some("selected"))} onclick={Callback::from(move |_| current.set(Some(item.clone())))}>
+                                        <button class={classes!("history-item", selected.then_some("selected"))} onclick={Callback::from(move |_| {
+                                            current.set(Some(item.clone()));
+                                            overlay_hidden.set(false);
+                                        })}>
                                             <img src={project.image.clone()} alt="Saved reference" />
                                         </button>
                                     }

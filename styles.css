@@ -101,6 +101,7 @@ button.primary:active:not(:disabled) { background: var(--accent-pressed); }
   z-index: 1;
   max-width: 96%;
   max-height: 92%;
+  mix-blend-mode: multiply;
   transform-origin: center;
   pointer-events: none;
   -webkit-user-drag: none;
