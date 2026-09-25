@@ -121,15 +121,40 @@ impl Project {
 }
 
 fn js_error(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| "The browser rejected the request.".into())
+    if let Some(message) = value.as_string() {
+        return message;
+    }
+    let name = Reflect::get(&value, &JsValue::from_str("name"))
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_default();
+    let message = Reflect::get(&value, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_default();
+
+    match name.as_str() {
+        "NotAllowedError" => "Camera access was denied. In Safari, open Page Settings, set Camera to Allow, then reload.".into(),
+        "NotFoundError" => "No camera was found on this device.".into(),
+        "NotReadableError" => "The camera is already in use by another app or browser tab.".into(),
+        "OverconstrainedError" => "The requested camera is unavailable on this device.".into(),
+        _ if !message.is_empty() => message,
+        _ => "The browser could not start the camera.".into(),
+    }
+}
+
+fn camera_error_name(value: &JsValue) -> String {
+    Reflect::get(value, &JsValue::from_str("name"))
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
 }
 
 #[function_component(App)]
 fn app() -> Html {
     let video_ref = use_node_ref();
     let file_input_ref = use_node_ref();
+    let camera_stream = use_mut_ref(|| None::<MediaStream>);
     let current = use_state(|| None::<Project>);
     let history = use_state(Vec::<Project>::new);
     let camera_on = use_state(|| false);
@@ -157,15 +182,32 @@ fn app() -> Html {
         let video_ref = video_ref.clone();
         let camera_on = camera_on.clone();
         let camera_error = camera_error.clone();
+        let camera_stream = camera_stream.clone();
         Callback::from(move |_| {
             let video_ref = video_ref.clone();
             let camera_on = camera_on.clone();
             let camera_error = camera_error.clone();
+            let camera_stream = camera_stream.clone();
             spawn_local(async move {
                 camera_error.set(None);
                 let result = async {
                     let window = web_sys::window().ok_or("No browser window is available.")?;
                     let devices = window.navigator().media_devices().map_err(js_error)?;
+                    let video = video_ref
+                        .cast::<HtmlVideoElement>()
+                        .ok_or("The camera view is not ready.")?;
+
+                    // Set DOM properties directly. The HTML `muted` attribute alone does
+                    // not reliably update the runtime property in iOS Safari.
+                    video.set_muted(true);
+                    video.set_autoplay(true);
+                    Reflect::set(
+                        video.as_ref(),
+                        &JsValue::from_str("playsInline"),
+                        &JsValue::TRUE,
+                    )
+                    .map_err(js_error)?;
+
                     let video_options = Object::new();
                     Reflect::set(
                         &video_options,
@@ -179,16 +221,30 @@ fn app() -> Html {
                     let promise = devices
                         .get_user_media_with_constraints(&constraints)
                         .map_err(js_error)?;
-                    let stream = JsFuture::from(promise)
-                        .await
-                        .map_err(js_error)?
-                        .dyn_into::<MediaStream>()
-                        .map_err(js_error)?;
-                    let video = video_ref
-                        .cast::<HtmlVideoElement>()
-                        .ok_or("The camera view is not ready.")?;
+                    let stream_value = match JsFuture::from(promise).await {
+                        Ok(stream) => stream,
+                        Err(error)
+                            if matches!(
+                                camera_error_name(&error).as_str(),
+                                "NotFoundError" | "OverconstrainedError"
+                            ) =>
+                        {
+                            let fallback = MediaStreamConstraints::new();
+                            fallback.set_audio(&JsValue::FALSE);
+                            fallback.set_video(&JsValue::TRUE);
+                            let promise = devices
+                                .get_user_media_with_constraints(&fallback)
+                                .map_err(js_error)?;
+                            JsFuture::from(promise).await.map_err(js_error)?
+                        }
+                        Err(error) => return Err(js_error(error)),
+                    };
+                    let stream = stream_value.dyn_into::<MediaStream>().map_err(js_error)?;
                     video.set_src_object(Some(&stream));
-                    let _ = video.play().map(JsFuture::from).map_err(js_error)?.await;
+                    *camera_stream.borrow_mut() = Some(stream);
+                    JsFuture::from(video.play().map_err(js_error)?)
+                        .await
+                        .map_err(js_error)?;
                     Ok::<(), String>(())
                 }
                 .await;
