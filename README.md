@@ -1,6 +1,12 @@
 # Trace
 
-A local-first tracing camera built with Rust, Yew, and WebAssembly.
+A free, local-first artwork tracing tool for the browser, built as an
+alternative to tracing apps with expensive recurring subscriptions. It uses
+your device camera and overlays a reference image so you can trace it onto
+paper or another physical surface.
+
+Built with Rust, Yew, and WebAssembly. Photos and project history remain on
+your device.
 
 ## Run locally
 
