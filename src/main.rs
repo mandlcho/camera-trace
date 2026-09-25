@@ -3,10 +3,14 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    Event, File, HtmlInputElement, HtmlVideoElement, InputEvent, MediaStream,
-    MediaStreamConstraints, PointerEvent, TouchEvent,
+    Event, File, HtmlElement, HtmlInputElement, HtmlVideoElement, InputEvent, KeyboardEvent,
+    MediaStream, MediaStreamConstraints, MouseEvent, PointerEvent, TouchEvent,
 };
 use yew::prelude::*;
+
+const ONBOARDING_KEY: &str = "camera-trace:onboarding:v1";
+const ALIGNMENT_HINT_KEY: &str = "camera-trace:alignment-hint:v1";
+const DISMISSED_VALUE: &str = "dismissed";
 
 #[wasm_bindgen(inline_js = r#"
 const DB_NAME = 'trace-projects';
@@ -176,18 +180,162 @@ fn camera_error_name(value: &JsValue) -> String {
         .unwrap_or_default()
 }
 
+fn stored_value_is_dismissed(value: Option<&str>) -> bool {
+    value == Some(DISMISSED_VALUE)
+}
+
+fn read_dismissed_preference(key: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(key).ok().flatten())
+        .is_some_and(|value| stored_value_is_dismissed(Some(&value)))
+}
+
+fn persist_dismissed_preference(key: &str) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(key, DISMISSED_VALUE);
+    }
+}
+
+fn should_show_intro(
+    history_loaded: bool,
+    onboarding_dismissed: bool,
+    has_current_project: bool,
+    has_saved_projects: bool,
+) -> bool {
+    history_loaded && !onboarding_dismissed && !has_current_project && !has_saved_projects
+}
+
+fn should_dismiss_onboarding(import_succeeded: bool, explicit_skip: bool) -> bool {
+    import_succeeded || explicit_skip
+}
+
+#[function_component(SetupDiagram)]
+fn setup_diagram() -> Html {
+    html! {
+        <svg class="setup-diagram" viewBox="0 0 320 176" role="img" aria-labelledby="setup-diagram-title setup-diagram-description">
+            <title id="setup-diagram-title">{"Phone supported above paper for tracing"}</title>
+            <desc id="setup-diagram-description">{"A stable overhead stand holds a phone horizontally with its rear camera facing down and screen facing up. Paper and clear space for a drawing hand are underneath."}</desc>
+            <rect class="diagram-paper" x="80" y="112" width="174" height="50" rx="4" />
+            <path class="diagram-drawing" d="M112 146c22-27 53-27 78-4 11 10 24 7 34-10" />
+            <path class="diagram-stand" d="M30 154V32h52v12H47v110" />
+            <path class="diagram-arm" d="M47 51h58" />
+            <rect class="diagram-phone" x="92" y="35" width="137" height="66" rx="10" />
+            <rect class="diagram-screen" x="100" y="42" width="121" height="52" rx="6" />
+            <path class="diagram-image" d="M116 80l21-20 17 14 14-11 34 28h-86z" />
+            <circle class="diagram-camera" cx="214" cy="96" r="3" />
+            <path class="diagram-direction" d="M207 106v22m-6-6 6 6 6-6" />
+            <path class="diagram-hand" d="M270 157c-8-8-10-17-5-25 2-4 5-3 7 1l4 8v-24c0-5 7-5 7 0v16-21c0-5 7-5 7 0v21-17c0-5 7-5 7 0v20-12c0-5 7-5 7 0v19c0 8-4 14-10 18" />
+            <text x="108" y="24">{"screen up"}</text>
+            <text x="173" y="142">{"paper"}</text>
+            <text x="243" y="102">{"hand space"}</text>
+            <text x="18" y="170">{"stable overhead stand"}</text>
+        </svg>
+    }
+}
+
+#[function_component(SetupSteps)]
+fn setup_steps() -> Html {
+    html! {
+        <>
+            <SetupDiagram />
+            <ol class="setup-steps">
+                <li>
+                    <span>{"1"}</span>
+                    <div><strong>{"Support your phone"}</strong><p>{"Use a stable overhead stand, rear camera pointing at the paper. Leave room for your drawing hand."}</p></div>
+                </li>
+                <li>
+                    <span>{"2"}</span>
+                    <div><strong>{"Choose and align a photo"}</strong><p>{"Start the camera, then adjust the image’s size, position and opacity."}</p></div>
+                </li>
+                <li>
+                    <span>{"3"}</span>
+                    <div><strong>{"Lock and trace"}</strong><p>{"Lock the image position and draw while looking at the screen. Keep the phone still."}</p></div>
+                </li>
+            </ol>
+        </>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct GuideSheetProps {
+    on_close: Callback<()>,
+    close_ref: NodeRef,
+}
+
+#[function_component(GuideSheet)]
+fn guide_sheet(props: &GuideSheetProps) -> Html {
+    let on_keydown = {
+        let on_close = props.on_close.clone();
+        let close_ref = props.close_ref.clone();
+        Callback::from(move |event: KeyboardEvent| match event.key().as_str() {
+            "Escape" => {
+                event.prevent_default();
+                event.stop_propagation();
+                on_close.emit(());
+            }
+            "Tab" => {
+                event.prevent_default();
+                if let Some(button) = close_ref.cast::<HtmlElement>() {
+                    let _ = button.focus();
+                }
+            }
+            _ => {}
+        })
+    };
+    let close_from_backdrop = {
+        let on_close = props.on_close.clone();
+        Callback::from(move |_| on_close.emit(()))
+    };
+
+    html! {
+        <div class="guide-backdrop" onclick={close_from_backdrop} onkeydown={on_keydown}>
+            <section
+                class="guide-sheet"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="guide-title"
+                onclick={Callback::from(|event: MouseEvent| event.stop_propagation())}
+            >
+                <header class="guide-header">
+                    <div>
+                        <p class="eyebrow">{"Camera Trace"}</p>
+                        <h2 id="guide-title">{"Setup guide"}</h2>
+                    </div>
+                    <button ref={props.close_ref.clone()} class="icon-button" aria-label="Close setup guide" onclick={{
+                        let on_close = props.on_close.clone();
+                        Callback::from(move |_| on_close.emit(()))
+                    }}>{"×"}</button>
+                </header>
+                <p class="guide-clarification">{"Your reference is a screen overlay—it isn’t physically projected onto the paper."}</p>
+                <SetupSteps />
+                <p class="privacy-note">{"Free to use. No account needed. Photos are processed and saved in this browser."}</p>
+            </section>
+        </div>
+    }
+}
+
 #[function_component(App)]
 fn app() -> Html {
     let video_ref = use_node_ref();
     let file_input_ref = use_node_ref();
+    let setup_guide_trigger_ref = use_node_ref();
+    let guide_close_ref = use_node_ref();
     let camera_stream = use_mut_ref(|| None::<MediaStream>);
     let current = use_state(|| None::<Project>);
     let history = use_state(Vec::<Project>::new);
+    let history_loaded = use_state(|| false);
     let camera_on = use_state(|| false);
     let camera_error = use_state(|| None::<String>);
+    let import_error = use_state(|| None::<String>);
     let busy = use_state(|| false);
     let overlay_hidden = use_state(|| false);
     let position_locked = use_state(|| false);
+    let onboarding_dismissed = use_state(|| read_dismissed_preference(ONBOARDING_KEY));
+    let alignment_hint_dismissed = use_state(|| read_dismissed_preference(ALIGNMENT_HINT_KEY));
+    let guide_open = use_state(|| false);
     // A mutable mirror makes the lock effective synchronously, including for callbacks
     // from a gesture or control that was attached before the locking render.
     let position_locked_ref = use_mut_ref(|| false);
@@ -196,15 +344,33 @@ fn app() -> Html {
 
     {
         let history = history.clone();
+        let history_loaded = history_loaded.clone();
+        let onboarding_dismissed = onboarding_dismissed.clone();
         use_effect_with((), move |_| {
             spawn_local(async move {
                 if let Ok(value) = load_projects().await
                     && let Some(json) = value.as_string()
                     && let Ok(projects) = serde_json::from_str::<Vec<Project>>(&json)
                 {
+                    if !projects.is_empty() {
+                        onboarding_dismissed.set(true);
+                        persist_dismissed_preference(ONBOARDING_KEY);
+                    }
                     history.set(projects);
                 }
+                history_loaded.set(true);
             });
+            || ()
+        });
+    }
+
+    {
+        let guide_open = guide_open.clone();
+        let guide_close_ref = guide_close_ref.clone();
+        use_effect_with(*guide_open, move |is_open| {
+            if *is_open && let Some(close_button) = guide_close_ref.cast::<HtmlElement>() {
+                let _ = close_button.focus();
+            }
             || ()
         });
     }
@@ -290,7 +456,9 @@ fn app() -> Html {
 
     let choose_photo = {
         let file_input_ref = file_input_ref.clone();
+        let import_error = import_error.clone();
         Callback::from(move |_| {
+            import_error.set(None);
             if let Some(input) = file_input_ref.cast::<HtmlInputElement>() {
                 input.click();
             }
@@ -301,6 +469,8 @@ fn app() -> Html {
         let current = current.clone();
         let history = history.clone();
         let busy = busy.clone();
+        let import_error = import_error.clone();
+        let onboarding_dismissed = onboarding_dismissed.clone();
         let overlay_hidden = overlay_hidden.clone();
         let position_locked = position_locked.clone();
         let position_locked_ref = position_locked_ref.clone();
@@ -310,31 +480,48 @@ fn app() -> Html {
             let Some(file) = input.files().and_then(|files| files.item(0)) else {
                 return;
             };
+            input.set_value("");
             let current = current.clone();
             let history = history.clone();
             let busy = busy.clone();
+            let import_error = import_error.clone();
+            let onboarding_dismissed = onboarding_dismissed.clone();
             let overlay_hidden = overlay_hidden.clone();
             let position_locked = position_locked.clone();
             let position_locked_ref = position_locked_ref.clone();
             let drag_state = drag_state.clone();
             busy.set(true);
             spawn_local(async move {
-                if let Ok(value) = read_image(file).await
-                    && let Some(image) = value.as_string()
-                {
-                    let project = Project::new(image);
-                    if let Ok(json) = serde_json::to_string(&project) {
-                        let _ = save_project(json).await;
+                match read_image(file).await {
+                    Ok(value) => {
+                        if let Some(image) = value.as_string() {
+                            let project = Project::new(image);
+                            if let Ok(json) = serde_json::to_string(&project) {
+                                let _ = save_project(json).await;
+                            }
+                            let mut next = (*history).clone();
+                            next.insert(0, project.clone());
+                            next.truncate(12);
+                            history.set(next);
+                            current.set(Some(project));
+                            overlay_hidden.set(false);
+                            position_locked.set(false);
+                            *position_locked_ref.borrow_mut() = false;
+                            *drag_state.borrow_mut() = None;
+                            import_error.set(None);
+                            if should_dismiss_onboarding(true, false) {
+                                onboarding_dismissed.set(true);
+                                persist_dismissed_preference(ONBOARDING_KEY);
+                            }
+                        } else {
+                            import_error.set(Some(
+                                "This image could not be prepared. Try another photo.".into(),
+                            ));
+                        }
                     }
-                    let mut next = (*history).clone();
-                    next.insert(0, project.clone());
-                    next.truncate(12);
-                    history.set(next);
-                    current.set(Some(project));
-                    overlay_hidden.set(false);
-                    position_locked.set(false);
-                    *position_locked_ref.borrow_mut() = false;
-                    *drag_state.borrow_mut() = None;
+                    Err(_) => import_error.set(Some(
+                        "This image could not be prepared. Try another photo.".into(),
+                    )),
                 }
                 busy.set(false);
             });
@@ -546,6 +733,7 @@ fn app() -> Html {
         let position_locked_ref = position_locked_ref.clone();
         let drag_state = drag_state.clone();
         let update_project = update_project.clone();
+        let alignment_hint_dismissed = alignment_hint_dismissed.clone();
         Callback::from(move |_| {
             if current.is_some() {
                 let next = !*position_locked_ref.borrow();
@@ -555,6 +743,44 @@ fn app() -> Html {
                     update_project.emit(project);
                 }
                 position_locked.set(next);
+                if next {
+                    alignment_hint_dismissed.set(true);
+                    persist_dismissed_preference(ALIGNMENT_HINT_KEY);
+                }
+            }
+        })
+    };
+
+    let skip_intro = {
+        let onboarding_dismissed = onboarding_dismissed.clone();
+        Callback::from(move |_| {
+            if should_dismiss_onboarding(false, true) {
+                onboarding_dismissed.set(true);
+                persist_dismissed_preference(ONBOARDING_KEY);
+            }
+        })
+    };
+
+    let dismiss_alignment_hint = {
+        let alignment_hint_dismissed = alignment_hint_dismissed.clone();
+        Callback::from(move |_| {
+            alignment_hint_dismissed.set(true);
+            persist_dismissed_preference(ALIGNMENT_HINT_KEY);
+        })
+    };
+
+    let open_guide = {
+        let guide_open = guide_open.clone();
+        Callback::from(move |_| guide_open.set(true))
+    };
+
+    let close_guide = {
+        let guide_open = guide_open.clone();
+        let setup_guide_trigger_ref = setup_guide_trigger_ref.clone();
+        Callback::from(move |_| {
+            guide_open.set(false);
+            if let Some(trigger) = setup_guide_trigger_ref.cast::<HtmlElement>() {
+                let _ = trigger.focus();
             }
         })
     };
@@ -593,6 +819,13 @@ fn app() -> Html {
         html! { <img class="reference" src={project.image.clone()} alt="Reference overlay" {style} draggable="false" /> }
     });
 
+    let intro_visible = should_show_intro(
+        *history_loaded,
+        *onboarding_dismissed,
+        current.is_some(),
+        !history.is_empty(),
+    );
+
     html! {
         <main class="app-shell">
             <section class="viewport">
@@ -604,13 +837,15 @@ fn app() -> Html {
                     onchange={on_file}
                 />
                 <video ref={video_ref} autoplay=true playsinline=true muted=true></video>
-                {overlay.unwrap_or_else(|| html! {
-                    <div class="empty-state">
-                        <div class="empty-mark">{"＋"}</div>
-                        <strong>{"No reference yet"}</strong>
-                        <p>{"Choose an image, then drag it over the camera view."}</p>
-                    </div>
-                })}
+                if !intro_visible {
+                    {overlay.unwrap_or_else(|| html! {
+                        <div class="empty-state">
+                            <div class="empty-mark">{"＋"}</div>
+                            <strong>{"Choose a reference photo"}</strong>
+                            <p>{"It will appear over the live camera view so you can align and trace it."}</p>
+                        </div>
+                    })}
+                }
                 if current.is_some() && !*overlay_hidden && !*position_locked {
                     <div
                         class="gesture-surface"
@@ -626,25 +861,34 @@ fn app() -> Html {
                         ontouchcancel={on_touch_end}
                     />
                 }
-                if !*camera_on {
-                    <div class="camera-prompt">
+                if !intro_visible && !*camera_on {
+                    <div class={classes!("camera-prompt", current.is_some().then_some("with-reference"))}>
+                        <strong>{"Camera is off"}</strong>
+                        <p>{"Start it when you’re ready to view the paper. Permission is only requested after you tap."}</p>
                         <button class="primary" onclick={start_camera}>{"Start camera"}</button>
                         if let Some(message) = camera_error.as_ref() {
                             <p class="error">{message}</p>
                         }
                     </div>
                 }
-                if current.is_some() && !*overlay_hidden {
+                if current.is_some() && !*overlay_hidden && *position_locked {
                     <div class={classes!("view-hint", (*position_locked).then_some("locked"))} role="status">
                         <span></span>
-                        {if *position_locked { "Position locked" } else { "Drag anywhere to position" }}
+                        {"Position locked on screen"}
                     </div>
                 }
 
-                <section class="control-dock">
+                if !intro_visible {
+                    <button
+                        ref={setup_guide_trigger_ref.clone()}
+                        class="setup-guide-trigger"
+                        onclick={open_guide}
+                    >{"Setup guide"}</button>
+
+                    <section class="control-dock">
                     <div class="action-row">
-                        <button class="primary" onclick={choose_photo} disabled={*busy}>
-                            {if *busy { "Preparing…" } else if current.is_some() { "Replace" } else { "Photo" }}
+                        <button class="primary" onclick={choose_photo.clone()} disabled={*busy}>
+                            {if *busy { "Preparing…" } else if current.is_some() { "Replace photo" } else { "Choose photo" }}
                         </button>
                         <button onclick={toggle_overlay} disabled={current.is_none()}>
                             {if *overlay_hidden { "Show" } else { "Hide" }}
@@ -652,6 +896,17 @@ fn app() -> Html {
                         <button onclick={flip} disabled={current.is_none() || *position_locked}>{"Flip"}</button>
                         <button onclick={reset} disabled={current.is_none() || *position_locked}>{"Reset"}</button>
                     </div>
+
+                    if let Some(message) = import_error.as_ref() {
+                        <p class="import-error" role="alert">{message}</p>
+                    }
+
+                    if current.is_some() && *camera_on && !*position_locked && !*alignment_hint_dismissed {
+                        <aside class="context-hint" aria-label="Alignment tip">
+                            <p><strong>{"Align the overlay"}</strong>{" Drag on the camera view, then adjust size and opacity. When it lines up, tap Lock position below."}</p>
+                            <button aria-label="Dismiss alignment tip" onclick={dismiss_alignment_hint.clone()}> {"×"} </button>
+                        </aside>
+                    }
 
                     if current.is_some() {
                         <div class={classes!("lock-row", (*position_locked).then_some("is-locked"))}>
@@ -718,7 +973,34 @@ fn app() -> Html {
                             <button class="danger-link" onclick={remove_current} disabled={current.is_none()}>{"Delete"}</button>
                         </div>
                     }
-                </section>
+                    </section>
+                }
+
+                if intro_visible {
+                    <section class="intro-screen" aria-labelledby="intro-title">
+                        <div class="intro-content">
+                            <p class="eyebrow">{"Camera Trace"}</p>
+                            <h1 id="intro-title">{"Trace a photo onto paper"}</h1>
+                            <p class="intro-lede">{"See your reference over the live camera view, then draw on paper while watching your phone screen."}</p>
+                            <p class="intro-clarification">{"The image appears on your screen—it isn’t projected onto the paper."}</p>
+                            <SetupSteps />
+                            if let Some(message) = import_error.as_ref() {
+                                <p class="intro-error" role="alert">{message}</p>
+                            }
+                            <div class="intro-actions">
+                                <button class="primary" onclick={choose_photo.clone()} disabled={*busy}>
+                                    {if *busy { "Preparing…" } else { "Choose photo" }}
+                                </button>
+                                <button class="secondary-action" onclick={skip_intro}>{"Skip intro"}</button>
+                            </div>
+                            <p class="privacy-note">{"Free to use. No account needed. Photos are processed and saved in this browser."}</p>
+                        </div>
+                    </section>
+                }
+
+                if *guide_open {
+                    <GuideSheet on_close={close_guide} close_ref={guide_close_ref.clone()} />
+                }
             </section>
 
         </main>
@@ -731,7 +1013,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::Project;
+    use super::{Project, should_dismiss_onboarding, should_show_intro, stored_value_is_dismissed};
 
     fn project() -> Project {
         Project {
@@ -796,5 +1078,34 @@ mod tests {
         assert_eq!((project.x, project.y), (100.0, 200.0));
         assert_eq!((project.scale, project.rotation), (2.5, 90.0));
         assert!(!project.flipped);
+    }
+
+    #[test]
+    fn fresh_visit_shows_intro_only_after_project_storage_has_loaded() {
+        assert!(!should_show_intro(false, false, false, false));
+        assert!(should_show_intro(true, false, false, false));
+    }
+
+    #[test]
+    fn returning_or_active_projects_do_not_show_intro() {
+        assert!(!should_show_intro(true, true, false, false));
+        assert!(!should_show_intro(true, false, true, false));
+        assert!(!should_show_intro(true, false, false, true));
+    }
+
+    #[test]
+    fn only_skip_or_successful_import_dismisses_onboarding() {
+        assert!(should_dismiss_onboarding(false, true));
+        assert!(should_dismiss_onboarding(true, false));
+        assert!(!should_dismiss_onboarding(false, false));
+    }
+
+    #[test]
+    fn unavailable_or_corrupted_preference_falls_back_to_not_dismissed() {
+        assert!(!stored_value_is_dismissed(None));
+        assert!(!stored_value_is_dismissed(Some("")));
+        assert!(!stored_value_is_dismissed(Some("true")));
+        assert!(!stored_value_is_dismissed(Some("{bad json")));
+        assert!(stored_value_is_dismissed(Some("dismissed")));
     }
 }
