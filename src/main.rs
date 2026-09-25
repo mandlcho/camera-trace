@@ -104,6 +104,46 @@ impl Project {
             updated_at: now,
         }
     }
+
+    fn set_number(&mut self, field: &str, value: f64, position_locked: bool) -> bool {
+        match field {
+            "opacity" => self.opacity = value,
+            "rotation" if !position_locked => self.rotation = value,
+            "scale" if !position_locked => self.scale = value,
+            _ => return false,
+        }
+        true
+    }
+
+    fn move_to(&mut self, x: f64, y: f64, position_locked: bool) -> bool {
+        if position_locked {
+            return false;
+        }
+        self.x = x;
+        self.y = y;
+        true
+    }
+
+    fn flip(&mut self, position_locked: bool) -> bool {
+        if position_locked {
+            return false;
+        }
+        self.flipped = !self.flipped;
+        true
+    }
+
+    fn reset(&mut self, position_locked: bool) -> bool {
+        if position_locked {
+            return false;
+        }
+        self.opacity = 0.5;
+        self.rotation = 0.0;
+        self.scale = 1.0;
+        self.x = 0.0;
+        self.y = 0.0;
+        self.flipped = false;
+        true
+    }
 }
 
 fn js_error(value: JsValue) -> String {
@@ -147,6 +187,10 @@ fn app() -> Html {
     let camera_error = use_state(|| None::<String>);
     let busy = use_state(|| false);
     let overlay_hidden = use_state(|| false);
+    let position_locked = use_state(|| false);
+    // A mutable mirror makes the lock effective synchronously, including for callbacks
+    // from a gesture or control that was attached before the locking render.
+    let position_locked_ref = use_mut_ref(|| false);
     // start x/y, original image x/y, and the latest project state
     let drag_state = use_mut_ref(|| None::<(f64, f64, f64, f64, Project)>);
 
@@ -258,6 +302,9 @@ fn app() -> Html {
         let history = history.clone();
         let busy = busy.clone();
         let overlay_hidden = overlay_hidden.clone();
+        let position_locked = position_locked.clone();
+        let position_locked_ref = position_locked_ref.clone();
+        let drag_state = drag_state.clone();
         Callback::from(move |event: Event| {
             let input: HtmlInputElement = event.target_unchecked_into();
             let Some(file) = input.files().and_then(|files| files.item(0)) else {
@@ -267,6 +314,9 @@ fn app() -> Html {
             let history = history.clone();
             let busy = busy.clone();
             let overlay_hidden = overlay_hidden.clone();
+            let position_locked = position_locked.clone();
+            let position_locked_ref = position_locked_ref.clone();
+            let drag_state = drag_state.clone();
             busy.set(true);
             spawn_local(async move {
                 if let Ok(value) = read_image(file).await
@@ -282,6 +332,9 @@ fn app() -> Html {
                     history.set(next);
                     current.set(Some(project));
                     overlay_hidden.set(false);
+                    position_locked.set(false);
+                    *position_locked_ref.borrow_mut() = false;
+                    *drag_state.borrow_mut() = None;
                 }
                 busy.set(false);
             });
@@ -314,7 +367,11 @@ fn app() -> Html {
     let on_pointer_down = {
         let current = current.clone();
         let drag_state = drag_state.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: PointerEvent| {
+            if *position_locked_ref.borrow() {
+                return;
+            }
             if let Some(project) = current.as_ref() {
                 event.prevent_default();
                 if let Some(target) = event.current_target() {
@@ -336,22 +393,34 @@ fn app() -> Html {
     let on_pointer_move = {
         let current = current.clone();
         let drag_state = drag_state.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: PointerEvent| {
+            if *position_locked_ref.borrow() {
+                *drag_state.borrow_mut() = None;
+                return;
+            }
             let mut drag = drag_state.borrow_mut();
             let Some((start_x, start_y, image_x, image_y, project)) = drag.as_mut() else {
                 return;
             };
             event.prevent_default();
-            project.x = *image_x + event.client_x() as f64 - *start_x;
-            project.y = *image_y + event.client_y() as f64 - *start_y;
-            current.set(Some(project.clone()));
+            let x = *image_x + event.client_x() as f64 - *start_x;
+            let y = *image_y + event.client_y() as f64 - *start_y;
+            if project.move_to(x, y, *position_locked_ref.borrow()) {
+                current.set(Some(project.clone()));
+            }
         })
     };
 
     let on_pointer_up = {
         let drag_state = drag_state.clone();
         let update_project = update_project.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |_: PointerEvent| {
+            if *position_locked_ref.borrow() {
+                *drag_state.borrow_mut() = None;
+                return;
+            }
             if let Some((_, _, _, _, project)) = drag_state.borrow_mut().take() {
                 update_project.emit(project);
             }
@@ -363,7 +432,11 @@ fn app() -> Html {
     let on_touch_start = {
         let current = current.clone();
         let drag_state = drag_state.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: TouchEvent| {
+            if *position_locked_ref.borrow() {
+                return;
+            }
             let Some(touch) = event.touches().item(0) else {
                 return;
             };
@@ -383,7 +456,12 @@ fn app() -> Html {
     let on_touch_move = {
         let current = current.clone();
         let drag_state = drag_state.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: TouchEvent| {
+            if *position_locked_ref.borrow() {
+                *drag_state.borrow_mut() = None;
+                return;
+            }
             let Some(touch) = event.touches().item(0) else {
                 return;
             };
@@ -392,17 +470,24 @@ fn app() -> Html {
                 return;
             };
             event.prevent_default();
-            project.x = *image_x + touch.client_x() as f64 - *start_x;
-            project.y = *image_y + touch.client_y() as f64 - *start_y;
-            current.set(Some(project.clone()));
+            let x = *image_x + touch.client_x() as f64 - *start_x;
+            let y = *image_y + touch.client_y() as f64 - *start_y;
+            if project.move_to(x, y, *position_locked_ref.borrow()) {
+                current.set(Some(project.clone()));
+            }
         })
     };
 
     let on_touch_end = {
         let drag_state = drag_state.clone();
         let update_project = update_project.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: TouchEvent| {
             event.prevent_default();
+            if *position_locked_ref.borrow() {
+                *drag_state.borrow_mut() = None;
+                return;
+            }
             if let Some((_, _, _, _, project)) = drag_state.borrow_mut().take() {
                 update_project.emit(project);
             }
@@ -412,17 +497,14 @@ fn app() -> Html {
     let set_number = |field: &'static str| {
         let current = current.clone();
         let update_project = update_project.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |event: InputEvent| {
             let input: HtmlInputElement = event.target_unchecked_into();
             if let Some(mut project) = (*current).clone() {
                 let value = input.value_as_number();
-                match field {
-                    "opacity" => project.opacity = value,
-                    "rotation" => project.rotation = value,
-                    "scale" => project.scale = value,
-                    _ => {}
+                if project.set_number(field, value, *position_locked_ref.borrow()) {
+                    update_project.emit(project);
                 }
-                update_project.emit(project);
             }
         })
     };
@@ -430,9 +512,11 @@ fn app() -> Html {
     let flip = {
         let current = current.clone();
         let update_project = update_project.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |_| {
-            if let Some(mut project) = (*current).clone() {
-                project.flipped = !project.flipped;
+            if let Some(mut project) = (*current).clone()
+                && project.flip(*position_locked_ref.borrow())
+            {
                 update_project.emit(project);
             }
         })
@@ -446,15 +530,31 @@ fn app() -> Html {
     let reset = {
         let current = current.clone();
         let update_project = update_project.clone();
+        let position_locked_ref = position_locked_ref.clone();
         Callback::from(move |_| {
-            if let Some(mut project) = (*current).clone() {
-                project.opacity = 0.5;
-                project.rotation = 0.0;
-                project.scale = 1.0;
-                project.x = 0.0;
-                project.y = 0.0;
-                project.flipped = false;
+            if let Some(mut project) = (*current).clone()
+                && project.reset(*position_locked_ref.borrow())
+            {
                 update_project.emit(project);
+            }
+        })
+    };
+
+    let toggle_position_lock = {
+        let current = current.clone();
+        let position_locked = position_locked.clone();
+        let position_locked_ref = position_locked_ref.clone();
+        let drag_state = drag_state.clone();
+        let update_project = update_project.clone();
+        Callback::from(move |_| {
+            if current.is_some() {
+                let next = !*position_locked_ref.borrow();
+                *position_locked_ref.borrow_mut() = next;
+                let active_drag = drag_state.borrow_mut().take();
+                if next && let Some((_, _, _, _, project)) = active_drag {
+                    update_project.emit(project);
+                }
+                position_locked.set(next);
             }
         })
     };
@@ -463,6 +563,9 @@ fn app() -> Html {
         let current = current.clone();
         let history = history.clone();
         let overlay_hidden = overlay_hidden.clone();
+        let position_locked = position_locked.clone();
+        let position_locked_ref = position_locked_ref.clone();
+        let drag_state = drag_state.clone();
         Callback::from(move |_| {
             let Some(project) = (*current).clone() else {
                 return;
@@ -472,6 +575,9 @@ fn app() -> Html {
             current.set(next.first().cloned());
             history.set(next);
             overlay_hidden.set(false);
+            position_locked.set(false);
+            *position_locked_ref.borrow_mut() = false;
+            *drag_state.borrow_mut() = None;
             spawn_local(async move {
                 let _ = delete_project(project.id).await;
             });
@@ -505,7 +611,7 @@ fn app() -> Html {
                         <p>{"Choose an image, then drag it over the camera view."}</p>
                     </div>
                 })}
-                if current.is_some() && !*overlay_hidden {
+                if current.is_some() && !*overlay_hidden && !*position_locked {
                     <div
                         class="gesture-surface"
                         role="application"
@@ -529,7 +635,10 @@ fn app() -> Html {
                     </div>
                 }
                 if current.is_some() && !*overlay_hidden {
-                    <div class="view-hint"><span></span>{"Drag anywhere to position"}</div>
+                    <div class={classes!("view-hint", (*position_locked).then_some("locked"))} role="status">
+                        <span></span>
+                        {if *position_locked { "Position locked" } else { "Drag anywhere to position" }}
+                    </div>
                 }
 
                 <section class="control-dock">
@@ -540,9 +649,25 @@ fn app() -> Html {
                         <button onclick={toggle_overlay} disabled={current.is_none()}>
                             {if *overlay_hidden { "Show" } else { "Hide" }}
                         </button>
-                        <button onclick={flip} disabled={current.is_none()}>{"Flip"}</button>
-                        <button onclick={reset} disabled={current.is_none()}>{"Reset"}</button>
+                        <button onclick={flip} disabled={current.is_none() || *position_locked}>{"Flip"}</button>
+                        <button onclick={reset} disabled={current.is_none() || *position_locked}>{"Reset"}</button>
                     </div>
+
+                    if current.is_some() {
+                        <div class={classes!("lock-row", (*position_locked).then_some("is-locked"))}>
+                            <div class="lock-copy">
+                                <strong>{if *position_locked { "Position locked" } else { "Ready to trace?" }}</strong>
+                                <span>{"Locks the image on screen—not the phone. Keep your phone steady while tracing."}</span>
+                            </div>
+                            <button
+                                class={classes!((!*position_locked).then_some("primary"), "lock-button")}
+                                onclick={toggle_position_lock}
+                                aria-pressed={position_locked.to_string()}
+                            >
+                                {if *position_locked { "Unlock" } else { "Lock position" }}
+                            </button>
+                        </div>
+                    }
 
                     if let Some(project) = current.as_ref() {
                         <div class="sliders">
@@ -553,12 +678,12 @@ fn app() -> Html {
                             </label>
                             <label>
                                 <span>{"Scale"}</span>
-                                <input type="range" min="0.2" max="3" step="0.05" value={project.scale.to_string()} oninput={set_number("scale")} />
+                                <input type="range" min="0.2" max="3" step="0.05" value={project.scale.to_string()} oninput={set_number("scale")} disabled={*position_locked} />
                                 <output>{format!("{:.1}×", project.scale)}</output>
                             </label>
                             <label>
                                 <span>{"Rotate"}</span>
-                                <input type="range" min="-180" max="180" step="1" value={project.rotation.to_string()} oninput={set_number("rotation")} />
+                                <input type="range" min="-180" max="180" step="1" value={project.rotation.to_string()} oninput={set_number("rotation")} disabled={*position_locked} />
                                 <output>{format!("{}°", project.rotation.round())}</output>
                             </label>
                         </div>
@@ -572,10 +697,18 @@ fn app() -> Html {
                                     let item = project.clone();
                                     let current = current.clone();
                                     let overlay_hidden = overlay_hidden.clone();
+                                    let position_locked = position_locked.clone();
+                                    let position_locked_ref = position_locked_ref.clone();
+                                    let drag_state = drag_state.clone();
                                     html! {
                                         <button class={classes!("history-item", selected.then_some("selected"))} onclick={Callback::from(move |_| {
                                             current.set(Some(item.clone()));
                                             overlay_hidden.set(false);
+                                            if !selected {
+                                                position_locked.set(false);
+                                                *position_locked_ref.borrow_mut() = false;
+                                                *drag_state.borrow_mut() = None;
+                                            }
                                         })}>
                                             <img src={project.image.clone()} alt="Saved reference" />
                                         </button>
@@ -594,4 +727,74 @@ fn app() -> Html {
 
 fn main() {
     yew::Renderer::<App>::new().render();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Project;
+
+    fn project() -> Project {
+        Project {
+            id: "test".into(),
+            image: "data:image/png;base64,test".into(),
+            opacity: 0.5,
+            rotation: 24.0,
+            scale: 1.4,
+            x: 18.0,
+            y: -9.0,
+            flipped: true,
+            updated_at: 0.0,
+        }
+    }
+
+    #[test]
+    fn locked_project_rejects_every_alignment_mutation() {
+        let mut project = project();
+        let original = project.clone();
+
+        assert!(!project.move_to(100.0, 200.0, true));
+        assert!(!project.set_number("scale", 2.5, true));
+        assert!(!project.set_number("rotation", 90.0, true));
+        assert!(!project.flip(true));
+        assert!(!project.reset(true));
+        assert_eq!(project, original);
+    }
+
+    #[test]
+    fn opacity_remains_editable_while_position_is_locked() {
+        let mut project = project();
+        let transform = (
+            project.x,
+            project.y,
+            project.scale,
+            project.rotation,
+            project.flipped,
+        );
+
+        assert!(project.set_number("opacity", 0.8, true));
+        assert_eq!(project.opacity, 0.8);
+        assert_eq!(
+            (
+                project.x,
+                project.y,
+                project.scale,
+                project.rotation,
+                project.flipped,
+            ),
+            transform
+        );
+    }
+
+    #[test]
+    fn unlocked_project_accepts_alignment_mutations() {
+        let mut project = project();
+
+        assert!(project.move_to(100.0, 200.0, false));
+        assert!(project.set_number("scale", 2.5, false));
+        assert!(project.set_number("rotation", 90.0, false));
+        assert!(project.flip(false));
+        assert_eq!((project.x, project.y), (100.0, 200.0));
+        assert_eq!((project.scale, project.rotation), (2.5, 90.0));
+        assert!(!project.flipped);
+    }
 }
