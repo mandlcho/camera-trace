@@ -135,7 +135,6 @@ fn app() -> Html {
     let camera_on = use_state(|| false);
     let camera_error = use_state(|| None::<String>);
     let busy = use_state(|| false);
-    let controls_open = use_state(|| true);
     // start x/y, original image x/y, and the latest project state
     let drag_state = use_mut_ref(|| None::<(f64, f64, f64, f64, Project)>);
 
@@ -437,21 +436,14 @@ fn app() -> Html {
 
     html! {
         <main class="app-shell">
-            <header class="topbar">
-                <div class="brand">
-                    <div class="brand-mark" aria-hidden="true">{"T"}</div>
-                    <div>
-                        <h1>{"Trace"}</h1>
-                        <p class="tagline">{"Camera overlay studio"}</p>
-                    </div>
-                </div>
-                <button class="icon-button" onclick={{
-                    let controls_open = controls_open.clone();
-                    Callback::from(move |_| controls_open.set(!*controls_open))
-                }} aria-label="Toggle controls">{if *controls_open { "Hide controls" } else { "Show controls" }}</button>
-            </header>
-
             <section class="viewport">
+                <input
+                    ref={file_input_ref}
+                    class="visually-hidden"
+                    type="file"
+                    accept="image/*"
+                    onchange={on_file}
+                />
                 <video ref={video_ref} autoplay=true playsinline=true muted=true></video>
                 {overlay.unwrap_or_else(|| html! {
                     <div class="empty-state">
@@ -486,24 +478,11 @@ fn app() -> Html {
                 if current.is_some() {
                     <div class="view-hint"><span></span>{"Drag anywhere to position"}</div>
                 }
-            </section>
 
-            if *controls_open {
-                <section class="control-panel">
-                    <input
-                        ref={file_input_ref}
-                        class="visually-hidden"
-                        type="file"
-                        accept="image/*"
-                        onchange={on_file}
-                    />
-                    <div class="panel-heading">
-                        <span>{"Reference"}</span>
-                        <small>{if current.is_some() { "Loaded" } else { "Not selected" }}</small>
-                    </div>
+                <section class="control-dock">
                     <div class="action-row">
                         <button class="primary" onclick={choose_photo} disabled={*busy}>
-                            {if *busy { "Preparing…" } else if current.is_some() { "Replace photo" } else { "Choose photo" }}
+                            {if *busy { "Preparing…" } else if current.is_some() { "Replace" } else { "Photo" }}
                         </button>
                         <button onclick={flip} disabled={current.is_none()}>{"Flip"}</button>
                         <button onclick={reset} disabled={current.is_none()}>{"Reset"}</button>
@@ -512,42 +491,43 @@ fn app() -> Html {
                     if let Some(project) = current.as_ref() {
                         <div class="sliders">
                             <label>
-                                <span>{"Opacity"}<output>{format!("{}%", (project.opacity * 100.0).round())}</output></span>
+                                <span>{"Opacity"}</span>
                                 <input type="range" min="0.05" max="1" step="0.01" value={project.opacity.to_string()} oninput={set_number("opacity")} />
+                                <output>{format!("{}%", (project.opacity * 100.0).round())}</output>
                             </label>
                             <label>
-                                <span>{"Scale"}<output>{format!("{:.1}×", project.scale)}</output></span>
+                                <span>{"Scale"}</span>
                                 <input type="range" min="0.2" max="3" step="0.05" value={project.scale.to_string()} oninput={set_number("scale")} />
+                                <output>{format!("{:.1}×", project.scale)}</output>
                             </label>
                             <label>
-                                <span>{"Rotation"}<output>{format!("{}°", project.rotation.round())}</output></span>
+                                <span>{"Rotate"}</span>
                                 <input type="range" min="-180" max="180" step="1" value={project.rotation.to_string()} oninput={set_number("rotation")} />
+                                <output>{format!("{}°", project.rotation.round())}</output>
                             </label>
                         </div>
                     }
-                </section>
-            }
 
-            if !history.is_empty() {
-                <section class="history">
-                    <div class="section-heading">
-                        <h2>{"Recent"}</h2>
-                        <button class="danger-link" onclick={remove_current} disabled={current.is_none()}>{"Delete current"}</button>
-                    </div>
-                    <div class="history-strip">
-                        {for history.iter().map(|project| {
-                            let selected = current.as_ref().is_some_and(|item| item.id == project.id);
-                            let item = project.clone();
-                            let current = current.clone();
-                            html! {
-                                <button class={classes!("history-item", selected.then_some("selected"))} onclick={Callback::from(move |_| current.set(Some(item.clone())))}>
-                                    <img src={project.image.clone()} alt="Saved reference" />
-                                </button>
-                            }
-                        })}
-                    </div>
+                    if !history.is_empty() {
+                        <div class="history-row">
+                            <div class="history-strip">
+                                {for history.iter().map(|project| {
+                                    let selected = current.as_ref().is_some_and(|item| item.id == project.id);
+                                    let item = project.clone();
+                                    let current = current.clone();
+                                    html! {
+                                        <button class={classes!("history-item", selected.then_some("selected"))} onclick={Callback::from(move |_| current.set(Some(item.clone())))}>
+                                            <img src={project.image.clone()} alt="Saved reference" />
+                                        </button>
+                                    }
+                                })}
+                            </div>
+                            <button class="danger-link" onclick={remove_current} disabled={current.is_none()}>{"Delete"}</button>
+                        </div>
+                    }
                 </section>
-            }
+            </section>
+
         </main>
     }
 }
