@@ -26,6 +26,9 @@ features = [
   "MediaStreamConstraints",
   "Navigator",
   "PointerEvent",
+  "Touch",
+  "TouchEvent",
+  "TouchList",
   "Window",
 ]
 

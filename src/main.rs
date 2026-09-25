@@ -4,7 +4,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     Event, File, HtmlInputElement, HtmlVideoElement, InputEvent, MediaStream,
-    MediaStreamConstraints, PointerEvent,
+    MediaStreamConstraints, PointerEvent, TouchEvent,
 };
 use yew::prelude::*;
 
@@ -136,7 +136,8 @@ fn app() -> Html {
     let camera_error = use_state(|| None::<String>);
     let busy = use_state(|| false);
     let controls_open = use_state(|| true);
-    let drag_origin = use_mut_ref(|| None::<(f64, f64, f64, f64)>);
+    // start x/y, original image x/y, and the latest project state
+    let drag_state = use_mut_ref(|| None::<(f64, f64, f64, f64, Project)>);
 
     {
         let history = history.clone();
@@ -267,7 +268,7 @@ fn app() -> Html {
 
     let on_pointer_down = {
         let current = current.clone();
-        let drag_origin = drag_origin.clone();
+        let drag_state = drag_state.clone();
         Callback::from(move |event: PointerEvent| {
             if let Some(project) = current.as_ref() {
                 event.prevent_default();
@@ -276,11 +277,12 @@ fn app() -> Html {
                         .dyn_into::<web_sys::Element>()
                         .map(|element| element.set_pointer_capture(event.pointer_id()));
                 }
-                *drag_origin.borrow_mut() = Some((
+                *drag_state.borrow_mut() = Some((
                     event.client_x() as f64,
                     event.client_y() as f64,
                     project.x,
                     project.y,
+                    project.clone(),
                 ));
             }
         })
@@ -288,26 +290,75 @@ fn app() -> Html {
 
     let on_pointer_move = {
         let current = current.clone();
-        let drag_origin = drag_origin.clone();
+        let drag_state = drag_state.clone();
         Callback::from(move |event: PointerEvent| {
-            let Some((start_x, start_y, image_x, image_y)) = *drag_origin.borrow() else {
+            let mut drag = drag_state.borrow_mut();
+            let Some((start_x, start_y, image_x, image_y, project)) = drag.as_mut() else {
                 return;
             };
-            if let Some(mut project) = (*current).clone() {
-                project.x = image_x + event.client_x() as f64 - start_x;
-                project.y = image_y + event.client_y() as f64 - start_y;
-                current.set(Some(project));
-            }
+            event.prevent_default();
+            project.x = *image_x + event.client_x() as f64 - *start_x;
+            project.y = *image_y + event.client_y() as f64 - *start_y;
+            current.set(Some(project.clone()));
         })
     };
 
     let on_pointer_up = {
-        let current = current.clone();
-        let drag_origin = drag_origin.clone();
+        let drag_state = drag_state.clone();
         let update_project = update_project.clone();
         Callback::from(move |_: PointerEvent| {
-            *drag_origin.borrow_mut() = None;
-            if let Some(project) = (*current).clone() {
+            if let Some((_, _, _, _, project)) = drag_state.borrow_mut().take() {
+                update_project.emit(project);
+            }
+        })
+    };
+
+    // Explicit touch handlers are kept alongside pointer events because older
+    // iOS WebKit versions can lose pointer capture when the camera video is active.
+    let on_touch_start = {
+        let current = current.clone();
+        let drag_state = drag_state.clone();
+        Callback::from(move |event: TouchEvent| {
+            let Some(touch) = event.touches().item(0) else {
+                return;
+            };
+            if let Some(project) = current.as_ref() {
+                event.prevent_default();
+                *drag_state.borrow_mut() = Some((
+                    touch.client_x() as f64,
+                    touch.client_y() as f64,
+                    project.x,
+                    project.y,
+                    project.clone(),
+                ));
+            }
+        })
+    };
+
+    let on_touch_move = {
+        let current = current.clone();
+        let drag_state = drag_state.clone();
+        Callback::from(move |event: TouchEvent| {
+            let Some(touch) = event.touches().item(0) else {
+                return;
+            };
+            let mut drag = drag_state.borrow_mut();
+            let Some((start_x, start_y, image_x, image_y, project)) = drag.as_mut() else {
+                return;
+            };
+            event.prevent_default();
+            project.x = *image_x + touch.client_x() as f64 - *start_x;
+            project.y = *image_y + touch.client_y() as f64 - *start_y;
+            current.set(Some(project.clone()));
+        })
+    };
+
+    let on_touch_end = {
+        let drag_state = drag_state.clone();
+        let update_project = update_project.clone();
+        Callback::from(move |event: TouchEvent| {
+            event.prevent_default();
+            if let Some((_, _, _, _, project)) = drag_state.borrow_mut().take() {
                 update_project.emit(project);
             }
         })
@@ -387,30 +438,43 @@ fn app() -> Html {
     html! {
         <main class="app-shell">
             <header class="topbar">
-                <div>
-                    <span class="eyebrow">{"TRACING CAMERA"}</span>
-                    <h1>{"Trace"}</h1>
+                <div class="brand">
+                    <div class="brand-mark" aria-hidden="true">{"T"}</div>
+                    <div>
+                        <h1>{"Trace"}</h1>
+                        <p class="tagline">{"Camera overlay studio"}</p>
+                    </div>
                 </div>
                 <button class="icon-button" onclick={{
                     let controls_open = controls_open.clone();
                     Callback::from(move |_| controls_open.set(!*controls_open))
-                }} aria-label="Toggle controls">{if *controls_open { "Hide" } else { "Edit" }}</button>
+                }} aria-label="Toggle controls">{if *controls_open { "Hide controls" } else { "Show controls" }}</button>
             </header>
 
-            <section
-                class="viewport"
-                onpointerdown={on_pointer_down}
-                onpointermove={on_pointer_move}
-                onpointerup={on_pointer_up.clone()}
-                onpointercancel={on_pointer_up}
-            >
+            <section class="viewport">
                 <video ref={video_ref} autoplay=true playsinline=true muted=true></video>
                 {overlay.unwrap_or_else(|| html! {
                     <div class="empty-state">
                         <div class="empty-mark">{"＋"}</div>
-                        <p>{"Add a reference photo to begin tracing."}</p>
+                        <strong>{"No reference yet"}</strong>
+                        <p>{"Choose an image, then drag it over the camera view."}</p>
                     </div>
                 })}
+                if current.is_some() {
+                    <div
+                        class="gesture-surface"
+                        role="application"
+                        aria-label="Drag to position reference image"
+                        onpointerdown={on_pointer_down}
+                        onpointermove={on_pointer_move}
+                        onpointerup={on_pointer_up.clone()}
+                        onpointercancel={on_pointer_up}
+                        ontouchstart={on_touch_start}
+                        ontouchmove={on_touch_move}
+                        ontouchend={on_touch_end.clone()}
+                        ontouchcancel={on_touch_end}
+                    />
+                }
                 if !*camera_on {
                     <div class="camera-prompt">
                         <button class="primary" onclick={start_camera}>{"Start camera"}</button>
@@ -419,7 +483,9 @@ fn app() -> Html {
                         }
                     </div>
                 }
-                <div class="view-hint">{"Drag the image to position it"}</div>
+                if current.is_some() {
+                    <div class="view-hint"><span></span>{"Drag anywhere to position"}</div>
+                }
             </section>
 
             if *controls_open {
@@ -431,6 +497,10 @@ fn app() -> Html {
                         accept="image/*"
                         onchange={on_file}
                     />
+                    <div class="panel-heading">
+                        <span>{"Reference"}</span>
+                        <small>{if current.is_some() { "Loaded" } else { "Not selected" }}</small>
+                    </div>
                     <div class="action-row">
                         <button class="primary" onclick={choose_photo} disabled={*busy}>
                             {if *busy { "Preparing…" } else if current.is_some() { "Replace photo" } else { "Choose photo" }}
